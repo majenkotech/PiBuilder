@@ -38,6 +38,9 @@ switch ($function) {
         installSystem();
         createUsers();
         installPackages();
+        configureServices();
+        configureNetwork();
+        cleanup();
         unmountImage();
         break;
 
@@ -48,6 +51,8 @@ switch ($function) {
     case "unmount":
         unmountImage();
         break;
+    default:
+        usage();
 }
 
 
@@ -129,6 +134,7 @@ function installSystem() {
     ));
 
     saveFile("root/etc/fstab", array(
+        "/dev/mmcblk0p2 / ext4 rw 0 0",
         "proc /proc proc defaults 0 0",
         "/dev/mmcblk0p1 /boot vfat defaults 0 0"
     ));
@@ -156,7 +162,7 @@ function installSystem() {
         "apt-get update",
         "apt-get install -y --allow-unauthenticated debian-keyring debian-archive-keyring",
         "apt-get update",
-        "apt-get install -y curl binutils apt-utils",
+        "apt-get install -y --allow-unauthenticated curl binutils apt-utils ucommon-utils",
         "rpi-update"
     ));
 }
@@ -168,7 +174,7 @@ function unmountImage() {
     systemWithReturn("Unmounting root/dev", "umount root/dev");
     systemWithReturn("Unmounting root/proc", "umount root/proc");
     systemWithReturn("Unmounting root/boot", "umount root/boot");
-    systemWithReturn("Unmounting root/dev", "umount root");
+    systemWithReturn("Unmounting root", "umount root");
 
 
     if (destroyNBD() === false) {
@@ -259,7 +265,7 @@ function createUsers() {
 
     foreach ($config['users'] as $u=>$p) {
         if ($u != "root") {
-            $script[] = "useradd $u";
+            $script[] = "useradd -m -s /bin/bash $u";
             $script[] = "echo \"$u:$p\" | chpasswd";
         }
     }
@@ -270,24 +276,91 @@ function createUsers() {
 function installPackages() {
     global $config;
 
-    $install = array();
-    $prune = array();
+    foreach ($config as $k=>$v) {
+        if (preg_match("/^packages\.(.*)$/", $k, $m)) {
 
-    foreach ($config['packages'] as $pkg=>$op) {
-        switch ($op) {
-            case "install": $install[] = $pkg; break;
-            case "prune": $prune[] = $pkg; break;
+            $install = array();
+            $prune = array();
+
+            foreach ($v as $pkg=>$op) {
+                switch ($op) {
+                    case "install": $install[] = $pkg; break;
+                    case "prune": $prune[] = $pkg; break;
+                }
+            }
+
+            $script = array(
+                "apt-get update",
+                "apt-get -y install " . implode(" ", $install),
+                "apt-get -y purge " . implode(" ", $prune),
+                "apt-get -y autoremove"
+            );
+
+            runInChroot("Installing " . $m[1] . " packages", $script);
+        }
+    }
+}
+
+function configureServices() {
+    global $config;
+
+    $script = array();
+
+    foreach ($config['services'] as $s=>$act) {
+        switch ($act) {
+            case "enable":
+                $script[] = "systemctl enable $s";
+                break;
+            case "disable":
+                $script[] = "systemctl disable $s";
+                break;
+            case "mask":
+                $script[] = "systemctl mask $s";
+                break;
         }
     }
 
-    $script = array(
-        "apt-get update",
-        "apt-get -y install " . implode(" ", $install),
-        "apt-get -y purge " . implode(" ", $prune),
-        "apt-get -y autoremove"
-    );
+    runInChroot("Configuring services", $script);
+}
 
-    runInChroot("Installing user packages", $script);
+function configureNetwork() {
+    global $config;
+
+    $script = array(
+        "apt-get -y install wpasupplicant net-tools isc-dhcp-client iputils-ping bind9-host traceroute iproute2 ifupdown ifupdown-extra"
+    );
+    runInChroot("Installing network packages", $script);
+
+    $net = array();
+
+    if (is_array($config['wifi'])) {
+        $wpa = array();
+        $wpa[] = "network={";
+        foreach ($config['wifi'] as $k=>$v) {
+            $wpa[] = "	$k=\"$v\"";
+        }
+        $wpa[] = "}";
+        saveFile("root/etc/wpa_supplicant/wpa_supplicant.conf", $wpa);
+
+        $net = array(
+            "auto wlan0",
+            "interface wlan0 inet dhcp",
+            ""
+        );
+    }
+
+    $net[] = "auto eth0";
+    $net[] = "interface eth0 inet dhcp";
+
+    saveFile("root/etc/network/interfaces", $net);
+    unlink("root/lib/udev/rules.d/73-usb-net-by-mac.rules");
+}
+
+function cleanup() {
+    $script = array(
+        "zerofill"
+    );
+    runInChroot("Cleaning up", $script);
 }
 
 // UTILITY FUNCTIONS
