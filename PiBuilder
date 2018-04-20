@@ -1,0 +1,398 @@
+#!/usr/bin/php
+<?php
+
+// CONFIG FILE PARSE AND SETUP
+
+$opts = getopt("vf:c:", [], $optind);
+
+$function = $opts['f'];
+$configfile = $opts['c'];
+
+if (!$configfile) {
+    print "Usage: PiBuilder <function> <config.pbi>\n";
+    exit(10);
+}
+
+if (!file_exists($configfile)) {
+    error("Cannot open $configfile");
+}
+
+$config = parse_ini_file($configfile, true);
+
+if ($config === false) {
+    error("Error parsing $configfile");
+}
+
+if ($config['system']['log']) {
+    @unlink($config['system']['log']);
+}
+
+switch ($function) {
+    case "build":
+        initImage();
+        mountImage(false);
+        installSystem();
+        createUsers();
+        installPackages();
+        unmountImage();
+        break;
+
+    case "mount":
+        mountImage();
+        break;
+
+    case "unmount":
+        unmountImage();
+        break;
+}
+
+
+function initImage() {
+    global $config;
+
+    if (createImage($config['image']['name'], $config['image']['size']) === false) {
+        error("Unable to create image " . $config['image']['name']);
+    }
+
+    // CREATE BLOCK DEVICE
+    if (createNBD($config['image']['name']) === false) {
+        error("Unable to create block device");
+    }
+    sleep(1);
+
+    // PARTITION BLOCK DEVICE
+    partitionImage($config['image']['boot']);
+
+    // FORMAT THE PARTITIONS
+    formatPartitions();
+
+    if (destroyNBD() === false) {
+        error("Unable to destroy block device");
+    }
+}
+
+
+function mountImage($incsys = true) {
+    global $config;
+
+    if (createNBD($config['image']['name']) === false) {
+        error("Unable to create block device");
+    }
+
+    @mkdir("root", 0777, true);
+    mountDevice("ext4", "/dev/nbd0p2", "root");
+    @mkdir("root/boot", 0755, true);
+    mountDevice("vfat", "/dev/nbd0p1", "root/boot");
+
+    if ($incsys) {
+        @mkdir("root/tmp", 01777, true);
+        @mkdir("root/dev", 0755, true);
+        @mkdir("root/proc", 0755, true);
+        @mkdir("root/sys", 0755, true);
+        mountDevice("devtmpfs", "udev", "root/dev");
+        mountDevice("proc", "proc", "root/proc");
+        mountDevice("sysfs", "sys", "root/sys");
+    }
+}
+
+function installSystem() {
+    global $config;
+
+    bootstrapStageOne($config['system']['variant'], $config['system']['version'], "root");
+
+    @mkdir("root/usr/bin", 0755, true);
+    copy("/usr/bin/qemu-arm-static", "root/usr/bin/qemu-arm-static");
+    chmod("root/usr/bin/qemu-arm-static", 0755);
+    touch("root/boot/start.elf");
+
+
+    systemWithReturn("Bootstrapping stage 2", "chroot root /debootstrap/debootstrap --second-stage");
+
+    @mkdir("root/tmp", 01777, true);
+    @mkdir("root/dev", 0755, true);
+    @mkdir("root/proc", 0755, true);
+    @mkdir("root/sys", 0755, true);
+    mountDevice("devtmpfs", "udev", "root/dev");
+    mountDevice("proc", "proc", "root/proc");
+    mountDevice("sysfs", "sys", "root/sys");
+
+    saveFile("root/etc/apt/sources.list", array(
+        "deb " . $config['system']['mirror'] . " " . $config['system']['version'] . " main contrib non-free"
+    ));
+
+    saveFile("root/boot/cmdline.txt", array(
+        "dwc_otg.lpm_enable=0 console=serial0,115200 console=tty1 root=/dev/mmcblk0p2 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait"
+    ));
+
+    saveFile("root/etc/fstab", array(
+        "proc /proc proc defaults 0 0",
+        "/dev/mmcblk0p1 /boot vfat defaults 0 0"
+    ));
+
+    saveFile("root/etc/hostname", array(
+        $config['system']['hostname']
+    ));
+
+    saveFile("root/etc/modules", array(
+        "vchiq",
+        "snd_bcm2835"
+    ));
+
+    saveFile("root/debconf.set", array(
+        "console-common console-data/keymap/policy  select  Select keymap from full list",
+        "console-common  console-data/keymap/full    select  de-latin1-nodeadkeys"
+    ));
+
+    systemWithReturn("Fetching rpi-update", "wget http://goo.gl/1BOfJ -O root/usr/bin/rpi-update");
+    chmod("root/usr/bin/rpi-update", 0755);
+
+    runInChroot("Installing initial packages", array(
+        "debconf-set-selections /debconf.set",
+        "rm -f /debconf.set",
+        "apt-get update",
+        "apt-get install -y --allow-unauthenticated debian-keyring debian-archive-keyring",
+        "apt-get update",
+        "apt-get install -y curl binutils apt-utils",
+        "rpi-update"
+    ));
+}
+
+function unmountImage() {
+    global $config;
+
+    systemWithReturn("Unmounting root/sys", "umount root/sys");
+    systemWithReturn("Unmounting root/dev", "umount root/dev");
+    systemWithReturn("Unmounting root/proc", "umount root/proc");
+    systemWithReturn("Unmounting root/boot", "umount root/boot");
+    systemWithReturn("Unmounting root/dev", "umount root");
+
+
+    if (destroyNBD() === false) {
+        error("Unable to destroy block device");
+    }
+}
+
+
+// WHERE THE WORK HAPPENS
+
+function runInChroot($what, $script) {
+    array_unshift($script, "#!/bin/bash");
+    array_unshift($script, "export PATH=/bin:/sbin:/usr/bin:/usr/sbin");
+    saveFile("root/script.sh", $script);
+    chmod("root/script.sh", 0755);
+    systemWithReturn($what, "chroot root /script.sh");
+    unlink("root/script.sh");
+}
+
+function saveFile($path, $data) {
+    file_put_contents($path, implode("\n", $data));
+}
+
+function bootstrapStageOne($variant, $version, $root) {
+    return systemWithReturn("Bootstrapping stage 1", "debootstrap --no-check-gpg --foreign --arch=armhf --variant=" .
+        escapeshellarg($variant) . " " .
+        escapeshellarg($version) . " " .
+        escapeshellarg($root) . " http://archive.raspbian.org/raspbian", true);
+}
+
+function mountDevice($type, $dev, $root) {
+    return systemWithReturn("Mounting $root", "mount -o rw -t " . escapeshellarg($type) . " " . escapeshellarg($dev) . " " . escapeshellarg($root));
+}
+
+function formatPartitions() {
+    if (systemWithReturn("Formatting boot partition", "mkfs.vfat /dev/nbd0p1") === false) {
+        error("Unable to format boot partition");
+    }
+
+    if (systemWithReturn("Formatting root partition", "mkfs.ext4 /dev/nbd0p2") === false) {
+        error("Unable to format root partition");
+    }
+}
+
+function createImage($filename, $size) {
+    return systemWithReturn("Creating image file", "qemu-img create -f raw " . escapeshellarg($filename) . " " . escapeshellarg($size));
+}
+
+function createNBD($filename) {
+    return systemWithReturn("Creating block device", "qemu-nbd -c /dev/nbd0 -f raw " . escapeshellarg($filename));
+}
+
+function destroyNBD() {
+    return systemWithReturn("Destroying block device", "qemu-nbd -d /dev/nbd0");
+}
+
+function partitionImage($bootsize) {
+    // o n p 1 <enter> +64M t b n p 2 <enter> <enter> w
+    $fd = popen("fdisk /dev/nbd0 > /dev/null", "w");
+    sleep(1);
+    fprintf($fd, "o\n");
+    fprintf($fd, "n\n");
+    fprintf($fd, "p\n");
+    fprintf($fd, "1\n");
+    fprintf($fd, "\n");
+    fprintf($fd, "+" . $bootsize . "\n");
+
+    fprintf($fd, "t\n");
+    fprintf($fd, "b\n");
+
+    fprintf($fd, "n\n");
+    fprintf($fd, "p\n");
+    fprintf($fd, "2\n");
+    fprintf($fd, "\n");
+    fprintf($fd, "\n");
+    fprintf($fd, "p\n");
+    fprintf($fd, "w\n");
+    sleep(1);
+    pclose($fd);
+}
+
+function createUsers() {
+    global $config;
+
+    $script = array(
+        "echo \"root:" . $config['users']['root'] . "\" | chpasswd"
+    );
+
+    foreach ($config['users'] as $u=>$p) {
+        if ($u != "root") {
+            $script[] = "useradd $u";
+            $script[] = "echo \"$u:$p\" | chpasswd";
+        }
+    }
+
+    runInChroot("Creating users", $script);
+}
+
+function installPackages() {
+    global $config;
+
+    $install = array();
+    $prune = array();
+
+    foreach ($config['packages'] as $pkg=>$op) {
+        switch ($op) {
+            case "install": $install[] = $pkg; break;
+            case "prune": $prune[] = $pkg; break;
+        }
+    }
+
+    $script = array(
+        "apt-get update",
+        "apt-get -y install " . implode(" ", $install),
+        "apt-get -y purge " . implode(" ", $prune),
+        "apt-get -y autoremove"
+    );
+
+    runInChroot("Installing user packages", $script);
+}
+
+// UTILITY FUNCTIONS
+
+function systemWithReturn($what, $command, $loud = false) {
+    global $config;
+    global $opts;
+
+    print "[....] $what";
+
+    $desc = array(
+        0 => array("file", "/dev/zero", "r"),
+        1 => array("pipe", "w"),
+        2 => array("pipe", "w")
+    );
+    $pipes = array();
+    $proc = proc_open($command, $desc, $pipes, NULL, array(
+        "LANG" => "C",
+        "PATH" => "/bin:/sbin:/usr/bin:/usr/sbin"
+    ));
+
+    if ($config['system']['log']) {
+        file_put_contents($config['system']['log'], "\n\n$what\n==============================\n\n", FILE_APPEND);
+    }
+
+    $stderr = array();
+
+    $pstat = proc_get_status($proc);
+    $t = 0;
+    while ($pstat['running']) {
+        $read = array($pipes[1], $pipes[2]);
+        $write = array();
+        $err = array();
+        if (stream_select($read, $write, $err, 0, 1000)) {
+            
+            foreach ($read as $fd) {
+                if ($fd == $pipes[1]) {
+                    $line = trim(fgets($pipes[1], 1000));
+                    if (array_key_exists("v", $opts)) {
+                        if ($line != "") print " : $line\n";
+                    }
+
+                    if ($config['system']['log']) {
+                        if ($line != "") {
+                            file_put_contents($config['system']['log'], $line . "\n", FILE_APPEND);
+                        }
+                    }
+
+                    $t++;
+                    if ($t == 10) $t = 0;
+                    switch ($t) {
+                        case 0: print "\r[[35m>...[0m] $what"; break;
+                        case 1: print "\r[[35m.>..[0m] $what"; break;
+                        case 2: print "\r[[35m..>.[0m] $what"; break;
+                        case 3: print "\r[[35m...>[0m] $what"; break;
+                        case 4: print "\r[[35m...|[0m] $what"; break;
+                        case 5: print "\r[[35m...<[0m] $what"; break;
+                        case 6: print "\r[[35m..<.[0m] $what"; break;
+                        case 7: print "\r[[35m.<..[0m] $what"; break;
+                        case 8: print "\r[[35m<...[0m] $what"; break;
+                        case 9: print "\r[[35m|...[0m] $what"; break;
+                    }
+                } else if($fd == $pipes[2]) {
+
+                    $s = trim(fgets($pipes[2], 1000));
+                    if ($s != "") { 
+                        $stderr[] = $s;
+                    }
+                    if ($config['system']['log']) {
+                        if ($s != "") {
+                            file_put_contents($config['system']['log'], $s . "\n", FILE_APPEND);
+                        }
+                    }
+                    $t++;
+                    if ($t == 10) $t = 0;
+                    switch ($t) {
+                        case 0: print "\r[[35m>...[0m] $what"; break;
+                        case 1: print "\r[[35m.>..[0m] $what"; break;
+                        case 2: print "\r[[35m..>.[0m] $what"; break;
+                        case 3: print "\r[[35m...>[0m] $what"; break;
+                        case 4: print "\r[[35m...|[0m] $what"; break;
+                        case 5: print "\r[[35m...<[0m] $what"; break;
+                        case 6: print "\r[[35m..<.[0m] $what"; break;
+                        case 7: print "\r[[35m.<..[0m] $what"; break;
+                        case 8: print "\r[[35m<...[0m] $what"; break;
+                        case 9: print "\r[[35m|...[0m] $what"; break;
+                    }
+                }
+            }
+        }
+        $pstat = proc_get_status($proc);
+    }
+    $r = $pstat['exitcode'];
+    proc_close($proc);
+
+    if ($r == 0) {
+        print "\r[[32mPASS[0m]\n";
+        return true;
+    } else {
+        print "\r[[31mFAIL[0m]\n";
+        print implode("\n", $stderr) . "\n";
+        return false;
+    }
+}
+
+function error($str) {
+    $stderr = fopen('php://stderr', 'w');
+    fprintf($stderr, "PiBuilder: $str\n");
+    fclose($stderr);
+    destroyNBD();
+    exit(10);
+}
