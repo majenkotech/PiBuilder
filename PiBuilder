@@ -8,10 +8,14 @@ $opts = getopt("vf:c:", [], $optind);
 $function = $opts['f'];
 $configfile = $opts['c'];
 
-if (!$configfile) {
-    print "Usage: PiBuilder <function> <config.pbi>\n";
+function usage() {
+    print "Usage: PiBuilder [-v] -f <function> -c <config.pbi>\n";
+    print "       Functions: build mount unmount\n";
     exit(10);
 }
+
+if (!$configfile) usage();
+if (!$function) usage();
 
 if (!file_exists($configfile)) {
     error("Cannot open $configfile");
