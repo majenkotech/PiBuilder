@@ -40,6 +40,8 @@ switch ($function) {
         installPackages();
         configureServices();
         configureNetwork();
+        copyFiles();
+        postScript();
         cleanup();
         unmountImage();
         break;
@@ -143,10 +145,18 @@ function installSystem() {
         $config['system']['hostname']
     ));
 
-    saveFile("root/etc/modules", array(
-        "vchiq",
-        "snd_bcm2835"
-    ));
+    $modules = array();
+    $blacklist = array();
+
+    foreach ($config['modules'] as $m=>$s) {
+        switch ($s) {
+            case "enable": $modules[] = $m; break;
+            case "blacklist": $blacklist[] = "blacklist $m"; break;
+        }
+    }
+
+    saveFile("root/etc/modules", $modules);
+    saveFile("root/etc/modprobe.d/blacklist-core.conf", $blacklist);
 
     saveFile("root/debconf.set", array(
         "console-common console-data/keymap/policy  select  Select keymap from full list",
@@ -344,13 +354,14 @@ function configureNetwork() {
 
         $net = array(
             "auto wlan0",
-            "interface wlan0 inet dhcp",
+            "iface wlan0 inet dhcp",
+            "	wpa-conf /etc/wpa_supplicant/wpa_supplicant.conf",
             ""
         );
     }
 
     $net[] = "auto eth0";
-    $net[] = "interface eth0 inet dhcp";
+    $net[] = "iface eth0 inet dhcp";
 
     saveFile("root/etc/network/interfaces", $net);
     unlink("root/lib/udev/rules.d/73-usb-net-by-mac.rules");
@@ -361,6 +372,20 @@ function cleanup() {
         "zerofill"
     );
     runInChroot("Cleaning up", $script);
+}
+
+function copyFiles() {
+    global $config;
+
+    foreach ($config['files'] as $from=>$to) {
+        copy($from, "root/$to");
+    }
+}
+
+function postScript() {
+    global $config;
+
+    runInChroot("Running post-install script", $config['post']['script']);
 }
 
 // UTILITY FUNCTIONS

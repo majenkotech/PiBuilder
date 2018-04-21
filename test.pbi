@@ -2,7 +2,7 @@
 variant=minbase
 version=stretch
 mirror=http://archive.raspbian.org/raspbian
-hostname=pkprog
+hostname=raspberrypi
 log=test.log
 
 [image]
@@ -39,7 +39,7 @@ openssh-server=install
 
 [users]
 root=root
-pk=pk
+pi=raspberry
 
 [files]
 
@@ -47,5 +47,3 @@ pk=pk
 ssh=enable
 
 [wifi]
-ssid=JencorpIntersplice
-psk=peripateticmonkeys
