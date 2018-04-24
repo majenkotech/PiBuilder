@@ -7,12 +7,20 @@ log=test.log
 
 [image]
 name=test.img
-size=1G
+size=2G
 boot=64M
+
+[debconf]
+debconf[]="console-common         console-data/keymap/policy     select  Select keymap from full list"
+debconf[]="console-common         console-data/keymap/full       select  de-latin1-nodeadkeys"
+debconf[]="keyboard-configuration keyboard-configuration/variant select  English (US)"
 
 [modules]
 vchiq=install
 snd_bcm2835=install
+
+[packages.system]
+systemd-sysv=install
 
 [packages.firmware]
 firmware-atheros=install
@@ -31,19 +39,47 @@ traceroute=install
 iproute2=install
 ifupdown=install
 ifupdown-extra=install
-
-[packages.user]
-avrdude=install
-systemd-sysv=install
 openssh-server=install
+wireless-tools=install
 
-[users]
-root=root
-pi=raspberry
+[packages.tools]
+vim=install
+sudo=install
+
+[user.root]
+password=root
+
+[user.pi]
+password=raspberry
+shell=/bin/bash
+home=/home/pi
+group[]=sudo
+
+[directories]
 
 [files]
+
+[post]
 
 [services]
 ssh=enable
 
 [wifi]
+ssid=YourSSID
+psk=YourPSK
+
+[repo.raspbian]
+url=http://mirrordirector.raspbian.org/raspbian
+release=stretch
+group[]=main
+group[]=contrib
+group[]=non-free
+group[]=rpi
+
+[repo.rasberrypi]
+url=http://archive.raspberrypi.org/debian
+release=stretch
+group[]=main
+group[]=ui
+
+[config]
