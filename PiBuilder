@@ -32,15 +32,22 @@ if ($config['system']['log']) {
 }
 
 switch ($function) {
+    case "test":
+        mountImage();
+        installPackages();
+        unmountImage();
+        break;
+
     case "build":
         initImage();
         mountImage(false);
         installSystem();
         createUsers();
         installPackages();
-        configureServices();
-        configureNetwork();
         copyFiles();
+        configureNetwork();
+        configureServices();
+        configTxt();
         postScript();
         cleanup();
         unmountImage();
@@ -127,9 +134,21 @@ function installSystem() {
     mountDevice("proc", "proc", "root/proc");
     mountDevice("sysfs", "sys", "root/sys");
 
-    saveFile("root/etc/apt/sources.list", array(
-        "deb " . $config['system']['mirror'] . " " . $config['system']['version'] . " main contrib non-free"
-    ));
+    $repos = array();
+    foreach ($config as $k=>$v) {
+        if (preg_match("/^repo\.(.*)$/", $k, $m)) {
+            $rep = array();
+            $rep[] = "deb";
+            $rep[] = $config[$k]['url'];
+            $rep[] = $config[$k]['release'];
+            foreach ($v['group'] as $g) {
+                $rep[] = $g;
+                $repos[] = implode(" ", $rep);
+            }
+        }
+    }
+
+    saveFile("root/etc/apt/sources.list", $repos);
 
     saveFile("root/boot/cmdline.txt", array(
         "dwc_otg.lpm_enable=0 console=serial0,115200 console=tty1 root=/dev/mmcblk0p2 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait"
@@ -158,10 +177,7 @@ function installSystem() {
     saveFile("root/etc/modules", $modules);
     saveFile("root/etc/modprobe.d/blacklist-core.conf", $blacklist);
 
-    saveFile("root/debconf.set", array(
-        "console-common console-data/keymap/policy  select  Select keymap from full list",
-        "console-common  console-data/keymap/full    select  de-latin1-nodeadkeys"
-    ));
+    saveFile("root/debconf.set", $config['debconf']['debconf']);
 
     systemWithReturn("Fetching rpi-update", "wget http://goo.gl/1BOfJ -O root/usr/bin/rpi-update");
     chmod("root/usr/bin/rpi-update", 0755);
@@ -170,7 +186,7 @@ function installSystem() {
         "debconf-set-selections /debconf.set",
         "rm -f /debconf.set",
         "apt-get update",
-        "apt-get install -y --allow-unauthenticated debian-keyring debian-archive-keyring",
+        "apt-get install -y --allow-unauthenticated debian-keyring debian-archive-keyring raspberrypi-archive-keyring",
         "apt-get update",
         "apt-get install -y --allow-unauthenticated curl binutils apt-utils ucommon-utils",
         "rpi-update"
@@ -270,13 +286,26 @@ function createUsers() {
     global $config;
 
     $script = array(
-        "echo \"root:" . $config['users']['root'] . "\" | chpasswd"
+        "echo \"root:" . $config['user.root']['password'] . "\" | chpasswd"
     );
 
-    foreach ($config['users'] as $u=>$p) {
-        if ($u != "root") {
-            $script[] = "useradd -m -s /bin/bash $u";
-            $script[] = "echo \"$u:$p\" | chpasswd";
+    foreach ($config as $k=>$v) {
+        if (preg_match("/^user\.(.*)$/", $k, $m)) {
+            $username = $m[1];
+            if ($username == "root") {
+                continue;
+            }
+            $password = $v['password'];
+            $home = $v['home'] ? $v['home'] : "/home/$username";
+            $shell = $v['shell'] ? $v['shell'] : "/bin/bash";
+            $groups = $v['group'];
+            $script[] = "useradd -m -d $home -s $shell $username";
+            $script[] = "echo \"$username:$password\" | chpasswd";
+            if (is_array($groups)) {
+                foreach ($groups as $g) {
+                    $script[] = "usermod -a -G $g $username";
+                }
+            }
         }
     }
 
@@ -291,11 +320,17 @@ function installPackages() {
 
             $install = array();
             $prune = array();
+            $manual = array();
 
             foreach ($v as $pkg=>$op) {
                 switch ($op) {
                     case "install": $install[] = $pkg; break;
                     case "prune": $prune[] = $pkg; break;
+                    default:
+                        if (substr($op,-4,4) == ".deb") {
+                            $manual[] = $op;
+                        }
+                        break;
                 }
             }
 
@@ -305,6 +340,11 @@ function installPackages() {
                 "apt-get -y purge " . implode(" ", $prune),
                 "apt-get -y autoremove"
             );
+
+            foreach ($manual as $f) {
+                copy($f, "root/tmp/" . basename($f));
+                $script[] = "dpkg -i /tmp/" . basename($f);
+            }
 
             runInChroot("Installing " . $m[1] . " packages", $script);
         }
@@ -368,6 +408,7 @@ function configureNetwork() {
 }
 
 function cleanup() {
+    return;
     $script = array(
         "zerofill"
     );
@@ -377,8 +418,17 @@ function cleanup() {
 function copyFiles() {
     global $config;
 
+    foreach ($config['directories'] as $dir=>$mode) {
+        mkdir("root/$dir", true);
+        chmod("root/$dir", intval($mode, 8));
+    }
+
     foreach ($config['files'] as $from=>$to) {
-        copy($from, "root/$to");
+        if (is_dir($from)) {
+            recursiveCopy($from, "root/" . $to);
+        } else {
+            copy($from, "root/$to");
+        }
     }
 }
 
@@ -386,6 +436,25 @@ function postScript() {
     global $config;
 
     runInChroot("Running post-install script", $config['post']['script']);
+}
+
+function configTxt() {
+    global $config;
+
+    $out = array();
+
+    foreach ($config['config'] as $k=>$v) {
+        if (is_array($v)) {
+            foreach ($v as $e) {
+                $out[] = "$k=$e";
+            }
+        } else {
+            $out[] = "$k=$v";
+        }
+    }
+
+    $text = implode("\n", $out) . "\n";
+    file_put_contents("root/boot/config.txt", $text, FILE_APPEND);
 }
 
 // UTILITY FUNCTIONS
@@ -498,3 +567,21 @@ function error($str) {
     destroyNBD();
     exit(10);
 }
+
+function recursiveCopy($src,$dst) { 
+    $dir = opendir($src); 
+    @mkdir($dst); 
+    chmod($dst, fileperms($src));
+    while(false !== ( $file = readdir($dir)) ) { 
+        if (( $file != '.' ) && ( $file != '..' )) { 
+            if ( is_dir($src . '/' . $file) ) { 
+                recursiveCopy($src . '/' . $file,$dst . '/' . $file); 
+            } 
+            else { 
+                copy($src . '/' . $file,$dst . '/' . $file); 
+                chmod($dst . '/' . $file, fileperms($src . '/' . $file));
+            } 
+        } 
+    } 
+    closedir($dir); 
+} 
