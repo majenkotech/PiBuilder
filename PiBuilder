@@ -27,9 +27,9 @@ if ($config === false) {
     error("Error parsing $configfile");
 }
 
-if ($config['system']['log']) {
-    @unlink($config['system']['log']);
-}
+//if ($config['system']['log']) {
+//    @unlink($config['system']['log']);
+//}
 
 switch ($function) {
     case "test":
@@ -44,8 +44,8 @@ switch ($function) {
         installSystem();
         createUsers();
         installPackages();
-        copyFiles();
         configureNetwork();
+        copyFiles();
         configureServices();
         configTxt();
         postScript();
@@ -143,8 +143,8 @@ function installSystem() {
             $rep[] = $config[$k]['release'];
             foreach ($v['group'] as $g) {
                 $rep[] = $g;
-                $repos[] = implode(" ", $rep);
             }
+            $repos[] = implode(" ", $rep);
         }
     }
 
@@ -182,13 +182,19 @@ function installSystem() {
     systemWithReturn("Fetching rpi-update", "wget http://goo.gl/1BOfJ -O root/usr/bin/rpi-update");
     chmod("root/usr/bin/rpi-update", 0755);
 
+    $epkg = array();
+    foreach ($config['packages.early'] as $pkg=>$act) {
+        if ($act == "install") {
+            $epkg[] = $pkg;
+        }
+    }
+
     runInChroot("Installing initial packages", array(
         "debconf-set-selections /debconf.set",
         "rm -f /debconf.set",
+        "apt-get update --allow-unauthenticated",
+        "apt-get install -y --allow-unauthenticated " . implode(" ", $epkg),
         "apt-get update",
-        "apt-get install -y --allow-unauthenticated debian-keyring debian-archive-keyring raspberrypi-archive-keyring",
-        "apt-get update",
-        "apt-get install -y --allow-unauthenticated curl binutils apt-utils ucommon-utils",
         "rpi-update"
     ));
 }
@@ -316,6 +322,7 @@ function installPackages() {
     global $config;
 
     foreach ($config as $k=>$v) {
+        if ($k == "packages.early") continue;
         if (preg_match("/^packages\.(.*)$/", $k, $m)) {
 
             $install = array();
@@ -379,7 +386,7 @@ function configureNetwork() {
     $script = array(
         "apt-get -y install wpasupplicant net-tools isc-dhcp-client iputils-ping bind9-host traceroute iproute2 ifupdown ifupdown-extra"
     );
-    runInChroot("Installing network packages", $script);
+    runInChroot("Installing network tools", $script);
 
     $net = array();
 
@@ -435,7 +442,9 @@ function copyFiles() {
 function postScript() {
     global $config;
 
-    runInChroot("Running post-install script", $config['post']['script']);
+    if (is_array($config['post']['script'])) {
+        runInChroot("Running post-install script", $config['post']['script']);
+    }
 }
 
 function configTxt() {
