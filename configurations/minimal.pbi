@@ -61,7 +61,6 @@ group[]=sudo
 
 [services]
 ssh=enable
-sethostmac=enable
 
 [wifi]
 
