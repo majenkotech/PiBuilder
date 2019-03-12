@@ -195,7 +195,7 @@ function installSystem() {
         "apt-get update --allow-unauthenticated",
         "apt-get install -y --allow-unauthenticated " . implode(" ", $epkg),
         "apt-get update",
-        "rpi-update"
+        "echo y | rpi-update"
     ));
 }
 
@@ -487,6 +487,9 @@ function systemWithReturn($what, $command, $loud = false) {
         "PATH" => "/bin:/sbin:/usr/bin:/usr/sbin"
     ));
 
+    stream_set_blocking($pipes[1], 0);
+    stream_set_blocking($pipes[2], 0);
+
     $stderr = array();
 
     $pstat = proc_get_status($proc);
@@ -596,3 +599,4 @@ function debug($text) {
         file_put_contents($config['system']['log'], $text, FILE_APPEND);
     }
 }
+
