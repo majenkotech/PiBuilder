@@ -480,14 +480,12 @@ function systemWithReturn($what, $command, $loud = false) {
         2 => array("pipe", "w")
     );
     $pipes = array();
+    debug("\n\n$what\n==============================\n\n");
+    debug("$ $command\n");
     $proc = proc_open($command, $desc, $pipes, NULL, array(
         "LANG" => "C",
         "PATH" => "/bin:/sbin:/usr/bin:/usr/sbin"
     ));
-
-    if ($config['system']['log']) {
-        file_put_contents($config['system']['log'], "\n\n$what\n==============================\n\n", FILE_APPEND);
-    }
 
     $stderr = array();
 
@@ -506,10 +504,8 @@ function systemWithReturn($what, $command, $loud = false) {
                         if ($line != "") print " : $line\n";
                     }
 
-                    if ($config['system']['log']) {
-                        if ($line != "") {
-                            file_put_contents($config['system']['log'], $line . "\n", FILE_APPEND);
-                        }
+                    if ($line != "") {
+                        debug($line . "\n");
                     }
 
                     $t++;
@@ -532,10 +528,9 @@ function systemWithReturn($what, $command, $loud = false) {
                     if ($s != "") { 
                         $stderr[] = $s;
                     }
-                    if ($config['system']['log']) {
-                        if ($s != "") {
-                            file_put_contents($config['system']['log'], $s . "\n", FILE_APPEND);
-                        }
+
+                    if ($s != "") {
+                        debug($s . "\n");
                     }
                     $t++;
                     if ($t == 10) $t = 0;
@@ -594,3 +589,10 @@ function recursiveCopy($src,$dst) {
     } 
     closedir($dir); 
 } 
+
+function debug($text) {
+    global $config;
+    if ($config['system']['log']) {
+        file_put_contents($config['system']['log'], $text, FILE_APPEND);
+    }
+}
